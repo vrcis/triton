@@ -56,8 +56,10 @@ else
 	#!/usr/bin/env bash
 	echo "Starting node-init.service..."
 	dns_domain=\$(mdata-get dns_domain)
-	echo "Adding DNS domain \"\${dns_domain}\" to /etc/resolv.conf..."
-	echo "search \${dns_domain}" >> /etc/resolv.conf
+   if [ -n "\${dns_domain}" ]; then
+	   echo "Adding DNS domain \"\${dns_domain}\" to /etc/resolv.conf..."
+	   echo "search \${dns_domain}" >> /etc/resolv.conf
+   fi
 	echo "Started node-init.service!"
 	EOF
 
