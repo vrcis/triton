@@ -29,9 +29,9 @@
 if [ -f /etc/systemd/system/node-init.service ]; then
    echo "The node-init service already exists. Nothing to do."
 else
-	echo "Creating the node-init service configuration file..."
+   echo "Creating the node-init service configuration file..."
 
-	cat > /etc/systemd/system/node-init.service <<-EOF
+   cat > /etc/systemd/system/node-init.service <<-EOF
 	[Unit]
 	Description=Initial node-init job
 	# Ensure this runs before Docker since it updates
@@ -49,27 +49,27 @@ else
 	WantedBy=multi-user.target
 	EOF
 
-	# create the service startup script
-	echo "Creating the node-init service startup script..."
+   # create the service startup script
+   echo "Creating the node-init service startup script..."
 
-	cat > /usr/local/bin/node-init <<-EOF
+   cat > /usr/local/bin/node-init <<-EOF
 	#!/usr/bin/env bash
 	echo "Starting node-init.service..."
 	dns_domain=\$(mdata-get dns_domain)
-   if [ -n "\${dns_domain}" ]; then
+	if [ -n "\${dns_domain}" ]; then
 	   echo "Adding DNS domain \"\${dns_domain}\" to /etc/resolv.conf..."
 	   echo "search \${dns_domain}" >> /etc/resolv.conf
-   fi
+	fi
 	echo "Started node-init.service!"
 	EOF
 
-	# make it executable
-	echo "Making the node-init startup script executable ..."
-	chmod +x /usr/local/bin/node-init
+   # make it executable
+   echo "Making the node-init startup script executable ..."
+   chmod +x /usr/local/bin/node-init
 
-	echo "Reloading the systemd manager configuration..."
-	systemctl daemon-reload
+   echo "Reloading the systemd manager configuration..."
+   systemctl daemon-reload
 
-	echo "Enabling and starting the node-init service..."
-	systemctl enable --now node-init
+   echo "Enabling and starting the node-init service..."
+   systemctl enable --now node-init
 fi
