@@ -54,13 +54,11 @@ else
 
    cat > /usr/local/bin/node-init <<-EOF
 	#!/usr/bin/env bash
-	echo "Starting node-init.service..."
 	dns_domain=\$(mdata-get dns_domain)
 	if [ -n "\${dns_domain}" ]; then
 	   echo "Adding DNS domain \"\${dns_domain}\" to /etc/resolv.conf..."
 	   echo "search \${dns_domain}" >> /etc/resolv.conf
 	fi
-	echo "Started node-init.service!"
 	EOF
 
    # make it executable
