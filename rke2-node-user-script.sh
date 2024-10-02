@@ -18,8 +18,8 @@ wait_for_apt_lock() {
 }
 
 configure_nfs_client() {
-	# apt -y -o DPkg::Lock::Timeout=300 install nfs-common
-	apt-get -y install nfs-common
+	# https://blog.sinjakli.co.uk/2021/10/25/waiting-for-apt-locks-without-the-hacky-bash-scripts/
+	apt-get -y -o DPkg::Lock::Timeout=300 install nfs-common
 
 	# Don't configure the node for NFSv4 domain mapping because that requires
 	# that the NFS client (this node) and server (Triton volume) have the same
