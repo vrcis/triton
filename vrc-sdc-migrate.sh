@@ -81,7 +81,7 @@ run_cmd_on_target_cn() {
 
 create_migration_record() {
 	has_delegate_dataset=false
-	if zfs list zones/4d124ca0-a443-4b2a-a6f5-fb04db3da218/data &>/dev/null; then
+	if zfs list "zones/${vm_uuid}/data" &>/dev/null; then
 		has_delegate_dataset=true
 	fi
 
