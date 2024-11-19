@@ -330,10 +330,6 @@ process_arguments() {
 
 	while [ -n "$1" ]; do
 		case "$1" in
-			--vm-uuid)
-				shift
-				vm_uuid=$1
-				;;
 			-n|--target-cn-address)
 				shift
 				target_cn_address=$1
