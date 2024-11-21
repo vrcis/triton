@@ -8,8 +8,6 @@ set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 
-# TODO - Can we make the script run from the HN and load the necessary stuff onto the source CN so that it can lookup with CN UUIDs
-
 main() {
 	process_arguments "$@"
 	validate_params
@@ -20,12 +18,16 @@ main() {
 		if ls -1rth /opt/.vm-migration.* >/dev/null 2>&1; then
 			ls -1rth /opt/.vm-migration.* | grep -v .backup | xargs -I@ basename @ | awk -F. '{print $NF}'
 		fi
+		exit
+	fi
+
+	has_delegate_dataset=false
+	if zfs list "zones/${vm_uuid}/data" &>/dev/null; then
+		has_delegate_dataset=true
+	fi
+
 	# migrate
-	elif ${migrate}; then
-		echo "Migrating VM ${vm_uuid} (${vm_alias}) to CN ${target_cn_address}..."
-		# TODO - validate image on target CN
-		create_migration_record
-		create_vm_info_backup
+	if ${migrate}; then
 		create_target_vm
 		stop_source_vm
 		create_source_snapshots
@@ -36,20 +38,13 @@ main() {
 		# looks like Triton automatically creates the cores dataset unlike on standalone SmartOS
 		# create_target_cores_dataset
 		start_target_vm
-		echo "VM migration successful!"
-		echo "Run the script again with the finalize or rollback subcommand to complete or rollback the migration."
 	# finalize
 	elif ${finalize}; then
-		echo "Finalizing migration for VM ${vm_uuid} (${vm_alias}) to CN ${target_cn_address}..."
 		destroy_source_snapshots
 		destroy_target_snapshots
 		delete_source_vm
-		delete_vm_info_backup
-		delete_migration_record
-		echo "VM migration finalized!"
 	# rollback
 	elif ${rollback}; then
-		echo "Rolling back migration for VM ${vm_uuid} (${vm_alias}) to CN ${target_cn_address}..."
 		hide_target_vm
 		show_source_vm
 		stop_target_vm
@@ -57,9 +52,6 @@ main() {
 		destroy_source_snapshots
 		delete_target_vm
 		start_source_vm
-		delete_vm_info_backup
-		delete_migration_record
-		echo "VM migration successfully rolled back."
 	fi
 }
 
@@ -75,69 +67,61 @@ print_help() {
 	echo
 }
 
+print_start() {
+	printf "%s..." "$@"
+}
+
+print_start_multiline() {
+	printf "%s...\n" "$@"
+}
+
+print_start_indent() {
+	printf "  %s..." "$@"
+}
+
+print_end() {
+	printf " done\n"
+}
+
+# print_end_multiline() {
+# 	printf "  ... done\n"
+# }
+
 run_cmd_on_target_cn() {
-	ssh -i /root/.ssh/sdc.id_rsa "${target_cn_address}" "$@"
+	ssh -i /root/.ssh/sdc.id_rsa -o StrictHostKeyChecking=no "${target_cn_address}" "$@"
 }
 
-create_migration_record() {
-	has_delegate_dataset=false
-	if zfs list "zones/${vm_uuid}/data" &>/dev/null; then
-		has_delegate_dataset=true
-	fi
-
-	echo "Creating migration record..."
-	{
-		echo "# Migration started on $(date)"
-		echo "target_cn_address=${target_cn_address}"
-		echo "has_delegate_dataset=${has_delegate_dataset}"
-	} > "/opt/.vm-migration.${vm_uuid}"
-}
-
-load_migration_record() {
-	echo "Loading migration record..."
-	# shellcheck disable=SC1090
-	source "/opt/.vm-migration.${vm_uuid}"
-}
-
-delete_migration_record() {
-	echo "Deleting migration record..."
-	rm "/opt/.vm-migration.${vm_uuid}"
-}
-
-get_vm_prop() {
-	json "${1}" < "${SCRIPT_DIR}/.vm-migration.${vm_uuid}.backup"
-}
-
-create_vm_info_backup() {
-	echo "Backing up source VM info..."
-	vmadm get "${vm_uuid}" > "${SCRIPT_DIR}/.vm-migration.${vm_uuid}.backup"
-}
-
-delete_vm_info_backup() {
-	echo "Deleting source VM info backup..."
-	rm "${SCRIPT_DIR}/.vm-migration.${vm_uuid}.backup"
-}
+# get_vm_prop() {
+# 	json "${1}" < "${SCRIPT_DIR}/.vm-migration.${vm_uuid}.backup"
+# }
 
 create_target_vm() {
 	# export zone config and send to target CN
-	echo "Creating target VM..."
+	print_start "Creating target VM"
 	zonecfg -z "${vm_uuid}" export | run_cmd_on_target_cn "cat > /tmp/${vm_uuid}.zcfg"
 	run_cmd_on_target_cn "zonecfg -z ${vm_uuid} -f /tmp/${vm_uuid}.zcfg && rm /tmp/${vm_uuid}.zcfg"
+	print_end
 }
 
 stop_source_vm() {
-	echo "Stopping source VM..."
-	vmadm stop "${vm_uuid}"
+	print_start_multiline "Stopping source VM"
+	output=$(vmadm stop "${vm_uuid}" 2>&1) || { rc=${PIPESTATUS[0]}; echo "${output}"; return "${rc}"; }
+	print_start_indent "${output}"
+	print_end
 }
 
 stop_target_vm() {
-	echo "Stopping target VM..."
-	run_cmd_on_target_cn "vmadm stop ${vm_uuid}"
+	print_start_multiline "Stopping target VM"
+	output=$(run_cmd_on_target_cn "vmadm stop ${vm_uuid}" 2>&1) || { rc=${PIPESTATUS[0]}; echo "${output}"; return "${rc}"; }
+	print_start_indent "${output}"
+	print_end
 }
 
 start_source_vm() {
-	echo "Starting source VM..."
-	vmadm start "${vm_uuid}"
+	print_start_multiline "Starting source VM"
+	output=$(vmadm start "${vm_uuid}" 2>&1) || { rc=${PIPESTATUS[0]}; echo "${output}"; return "${rc}"; }
+	print_start_indent "${output}"
+	print_end
 }
 
 indestructible_delegated() {
@@ -147,63 +131,88 @@ indestructible_delegated() {
 }
 
 show_source_vm() {
-	echo "Showing source VM to Triton..."
-	vmadm update "${vm_uuid}" indestructible_zoneroot=false $(indestructible_delegated false) do_not_inventory=false
+	print_start_multiline "Showing source VM to Triton"
+	output=$(vmadm update "${vm_uuid}" indestructible_zoneroot=false $(indestructible_delegated false) do_not_inventory=false 2>&1) || { rc=${PIPESTATUS[0]}; echo "${output}"; return "${rc}"; }
+	print_start_indent "${output}"
+
 	# do we need this to take affect immediately?
 	svcadm restart vm-agent
+	print_end
 }
 
 hide_source_vm() {
-	echo "Safeguarding source VM and hiding it from Triton..."
-	vmadm update "${vm_uuid}" indestructible_zoneroot=true $(indestructible_delegated true) do_not_inventory=true
+	print_start_multiline "Hiding source VM from Triton"
+
+	output=$(vmadm update "${vm_uuid}" indestructible_zoneroot=true $(indestructible_delegated true) do_not_inventory=true 2>&1) || { rc=${PIPESTATUS[0]}; echo "${output}"; return "${rc}"; }
+	print_start_indent "${output}"
+
 	# do we need this to take affect immediately?
 	svcadm restart vm-agent
+	print_end
 }
 
 show_target_vm() {
-	echo "Making target VM discoverable by Triton..."
-	run_cmd_on_target_cn "vmadm update ${vm_uuid} do_not_inventory=false"
+	print_start_multiline "Showing target VM to Triton"
+	output=$(run_cmd_on_target_cn "vmadm update ${vm_uuid} do_not_inventory=false" 2>&1) || { rc=${PIPESTATUS[0]}; echo "${output}"; return "${rc}"; }
+	print_start_indent "${output}"
+	print_end
 }
 
 hide_target_vm() {
-	echo "Hiding target VM from Triton..."
-	run_cmd_on_target_cn "vmadm update ${vm_uuid} do_not_inventory=true"
+	print_start_multiline "Hiding target VM from Triton"
+	output=$(run_cmd_on_target_cn "vmadm update ${vm_uuid} do_not_inventory=true" 2>&1) || { rc=${PIPESTATUS[0]}; echo "${output}"; return "${rc}"; }
+	print_start_indent "${output}"
+
 	# do we need this to take affect immediately?
 	run_cmd_on_target_cn "svcadm restart vm-agent"
+	print_end
 }
 
 delete_source_vm() {
-	echo "Deleting source VM..."
-	vmadm update "${vm_uuid}" indestructible_zoneroot=false $(indestructible_delegated false)
-	vmadm delete "${vm_uuid:?}"
+	print_start_multiline "Deleting source VM"
+
+	output=$(vmadm update "${vm_uuid}" indestructible_zoneroot=false $(indestructible_delegated false) 2>&1) || { rc=${PIPESTATUS[0]}; echo "${output}"; return "${rc}"; }
+	print_start_indent "${output}"
+	print_end
+
+	output=$(vmadm delete "${vm_uuid:?}" 2>&1) || { rc=${PIPESTATUS[0]}; echo "${output}"; return "${rc}"; }
+	print_start_indent "${output}"
+	print_end
 }
 
 delete_target_vm() {
-	echo "Deleting target VM..."
-	run_cmd_on_target_cn "vmadm delete ${vm_uuid:?}"
+	print_start_multiline "Deleting target VM"
+
+	output=$(run_cmd_on_target_cn "vmadm delete ${vm_uuid:?}" 2>&1) || { rc=${PIPESTATUS[0]}; echo "${output}"; return "${rc}"; }
+	print_start_indent "${output}"
+
+	print_end
 }
 
 create_source_snapshots() {
 	# create recursive snapshot
-	echo "Creating recursive @${snapshot_name} snapshot..."
+	print_start "Creating recursive @${snapshot_name} snapshot"
 	zfs snap -r "zones/${vm_uuid}@${snapshot_name}"
+	print_end
 }
 
 destroy_source_snapshots() {
 	# create recursive snapshot
-	echo "Destroying source @${snapshot_name} snapshots..."
+	print_start "Destroying source @${snapshot_name} snapshots"
 	zfs destroy -r "zones/${vm_uuid:?}@${snapshot_name:?}"
+	print_end
 }
 
 destroy_target_snapshots() {
 	# create recursive snapshot
-	echo "Destroying target @${snapshot_name} snapshots..."
+	print_start "Destroying target @${snapshot_name} snapshots"
 	run_cmd_on_target_cn "zfs destroy -r zones/${vm_uuid:?}@${snapshot_name:?}"
+	print_end
 }
 
 sync_datasets() {
-	# local brand=$(get_vm_prop brand)
 	local dataset dataset_type prop_names preserved_props origin origin_image_uuid
+	print_start_multiline "Syncing VM datasets"
 
 	# for each dataset attached to the VM
 	for dataset in $(zfs list -rHo name "zones/${vm_uuid}"); do
@@ -231,47 +240,46 @@ sync_datasets() {
 
 			# verify/import image on target CN
 			origin_image_uuid=$(echo "${origin}" | sed -n 's|zones/\([0-9a-f-]*\)@.*|\1|p')
-			run_cmd_on_target_cn "imgadm import ${origin_image_uuid}"
+
+			output=$(run_cmd_on_target_cn "imgadm import ${origin_image_uuid}" 2>&1) || { rc=${PIPESTATUS[0]}; echo "${output}"; return "${rc}"; }
+			print_start_indent "${output}"
+			print_end
 		fi
 
 		# ZFS send/recv from the source CN to the target CN
-		echo "Syncing ${dataset}@${snapshot_name}..."
+		print_start_indent "Syncing ${dataset}@${snapshot_name}"
 		zfs send "${dataset}@${snapshot_name}" | ssh -i /root/.ssh/sdc.id_rsa -c aes128-gcm@openssh.com "${target_cn_address}" "zfs recv ${preserved_props} -d zones"
+		print_end
 	done
 }
 
 attach_target_vm() {
-	echo "Attaching target VM..."
+	print_start "Attaching target VM"
 	run_cmd_on_target_cn "zoneadm -z ${vm_uuid} attach"
+	print_end
 }
 
-create_target_cores_dataset() {
-	echo "Creating the cores dataset for the target VM..."
-	run_cmd_on_target_cn "zfs create -o quota=1000m -o compression=gzip -o mountpoint=/zones/${vm_uuid}/cores zones/cores/${vm_uuid}"
-}
+# create_target_cores_dataset() {
+# 	echo "Creating the cores dataset for the target VM..."
+# 	run_cmd_on_target_cn "zfs create -o quota=1000m -o compression=gzip -o mountpoint=/zones/${vm_uuid}/cores zones/cores/${vm_uuid}"
+# }
 
 start_target_vm() {
-	echo "Starting target VM..."
-	run_cmd_on_target_cn "vmadm start ${vm_uuid}"
+	print_start_multiline "Starting target VM"
+
+	output=$(run_cmd_on_target_cn "vmadm start ${vm_uuid}" 2>&1) || { rc=${PIPESTATUS[0]}; echo "${output}"; return "${rc}"; }
+	print_start_indent "${output}"
+
+	print_end
 }
 
 validate_params() {
 	# there are no params to validate for listing migrations
 	${list} && return
 
-	if ${finalize} || ${rollback}; then
-		load_migration_record
-	fi
-
-	if  [ -z "${vm_uuid}" ]; then
+	if [ -z "${vm_uuid}" ]; then
 		echo "No VM UUID specified" >&2
 		print_help
-		exit 1
-	fi
-
-	# make sure there is a record of this migration before finalizing or rolling back
-	if ${finalize} || ${rollback} && [ ! -f "/opt/.vm-migration.${vm_uuid}" ]; then
-		echo "No migration record found for VM ${vm_uuid}" >&2
 		exit 1
 	fi
 
@@ -345,7 +353,7 @@ process_arguments() {
 			*)
 				vm_uuid=$1
 
-				# TODO - validate VM UUID
+				# validate VM UUID
 				vm_alias=$(vmadm list uuid="${vm_uuid}" -Ho alias)
 				if [ -z "${vm_alias}" ]; then
 					echo "Invalid VM UUID: ${vm_uuid}" >&2

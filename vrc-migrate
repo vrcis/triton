@@ -1,0 +1,314 @@
+#!/usr/bin/env bash
+
+# https://docs.tritondatacenter.com/private-cloud/instances/migrating
+# https://docs.smartos.org/managing-instances-with-vmamd/#manual-migration
+
+set -o errexit
+set -o pipefail
+
+# SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+
+main() {
+	process_arguments "$@"
+
+	# list migrations
+	if ${list}; then
+		echo "UUID"
+		if ls -1rth /opt/.vm-migration.* >/dev/null 2>&1; then
+			ls -1rth /opt/.vm-migration.* | grep -v .backup | xargs -I@ basename @ | awk -F. '{print $NF}'
+		fi
+		exit
+	fi
+
+	validate_params
+
+	# validate VM UUID
+	vm_alias=$(get_vm_prop "alias")
+
+	if [ -z "${vm_alias}" ]; then
+		echo "Failed to deterine alias for VM ${vm_uuid}" >&2
+		exit 1
+	fi
+
+	# migrate
+	if ${migrate}; then
+		echo "Migrating VM ${vm_uuid} (${vm_alias}) to CN ${target_cn_hostname}..."
+
+		# look up the source CN that hosts the VM being migrated
+		source_cn_uuid=$(sdc-vmapi "/vms/${vm_uuid}" | json -Ha server_uuid)
+		source_cn_hostname=$(sdc-server lookup -H uuid="${source_cn_uuid}")
+		source_cn_address=$(sdc-server admin-ip "${source_cn_uuid}")
+
+		if [ -z "${source_cn_uuid}" ]; then
+			echo "Failed to lookup server_uuid for VM ${vm_uuid}" >&2
+			exit 1
+		fi
+
+		create_migration_record
+		create_vm_info_backup
+
+		# install the vrc-sdc-migrate.sh script on the source CN
+		printf "Installing /opt/local/bin/vrc-sdc-migrate.sh on the source CN (%s)... " "${source_cn_hostname}"
+		out=$(sdc-oneachnode -n "${source_cn_uuid}" -J "mkdir -p /opt/local/bin")
+		process_script_result "${out}"
+
+		out=$(sdc-oneachnode -n "${source_cn_uuid}" -J --get=/opt/local/bin/vrc-sdc-migrate.sh --dir=/opt/local/bin -X)
+		process_script_result "${out}"
+
+		# run the script on the source CN (30 min timeout)
+		# out=$(sdc-oneachnode -n "${source_cn_uuid}" -J --exectimeout=1800 "chmod +x /opt/local/bin/vrc-sdc-migrate.sh && /opt/local/bin/vrc-sdc-migrate.sh migrate -n ${target_cn_address} ${vm_uuid}")
+		# process_script_result "${out}"
+		run_cmd_on_source_cn "chmod +x /opt/local/bin/vrc-sdc-migrate.sh && /opt/local/bin/vrc-sdc-migrate.sh migrate -n ${target_cn_address} ${vm_uuid}"
+
+		echo "VM migration successful!"
+		echo "Run the script again with the finalize or rollback subcommand to complete or rollback the migration."
+	# finalize
+	elif ${finalize}; then
+		echo "Finalizing migration for VM ${vm_uuid} (${vm_alias}) to CN ${target_cn_hostname}..."
+
+		# run the script on the source CN
+		# out=$(sdc-oneachnode -n "${source_cn_uuid}" -J --exectimeout=300 "/opt/local/bin/vrc-sdc-migrate.sh finalize -n ${target_cn_address} ${vm_uuid} && rm /opt/local/bin/vrc-sdc-migrate.sh")
+		# process_script_result "${out}"
+		run_cmd_on_source_cn "/opt/local/bin/vrc-sdc-migrate.sh finalize -n ${target_cn_address} ${vm_uuid} && rm /opt/local/bin/vrc-sdc-migrate.sh"
+
+		delete_vm_info_backup
+		delete_migration_record
+		echo "VM migration finalized!"
+	# rollback
+	elif ${rollback}; then
+		echo "Rolling back migration for VM ${vm_uuid} (${vm_alias}) to CN ${target_cn_hostname}..."
+
+		# run the script on the source CN
+		# out=$(sdc-oneachnode -n "${source_cn_uuid}" -J --exectimeout=300 "chmod +x /opt/local/bin/vrc-sdc-migrate.sh && /opt/local/bin/vrc-sdc-migrate.sh rollback -n ${target_cn_address} ${vm_uuid} && rm /opt/local/bin/vrc-sdc-migrate.sh")
+		# process_script_result "${out}"
+		run_cmd_on_source_cn "/opt/local/bin/vrc-sdc-migrate.sh rollback -n ${target_cn_address} ${vm_uuid} && rm /opt/local/bin/vrc-sdc-migrate.sh"
+
+		delete_vm_info_backup
+		echo "VM migration successfully rolled back."
+	fi
+
+	# hn_uuid=$(sysinfo | json UUID)
+	# hn_address=$(sdc-server admin-ip "${hn_uuid}")
+}
+
+print_help() {
+	echo "Usage:"
+	printf "\t%s <sub-command> [options]\n" "$(basename $0)"
+	echo
+	echo "Sub-commands:"
+	printf "\tlist                                - list migrations\n"
+	printf "\tmigrate -n TARGET_CN VM_UUID        - full automatic migration for this instance\n"
+	printf "\tfinalize VM_UUID                    - cleanup, removes the original source instance\n"
+	printf "\trollback VM_UUID                    - revert back to the original source instance\n"
+	echo
+}
+
+process_arguments() {
+	action="${1}"
+	list=false
+	migrate=false
+	finalize=false
+	rollback=false
+
+	if [ -z "${action}" ]; then
+		print_help
+		exit 1
+	fi
+
+	shift
+
+	case "${action}" in
+		list)
+			list=true
+			;;
+		migrate)
+			migrate=true
+			;;
+		finalize)
+			finalize=true
+			;;
+		rollback)
+			rollback=true
+			;;
+		*)
+			echo "Invalid subcommand: ${action}" >&2
+			print_help
+			exit 1
+	esac
+
+	while [ -n "$1" ]; do
+		case "$1" in
+			-n|--cn)
+				shift
+
+				if [[ "${1}" =~ ^\{?[A-F0-9a-f]{8}-[A-F0-9a-f]{4}-[A-F0-9a-f]{4}-[A-F0-9a-f]{4}-[A-F0-9a-f]{12}\}?$ ]]; then
+					target_cn_uuid=$1
+					target_cn_hostname=$(sdc-server lookup -H uuid="${target_cn_uuid}")
+				else
+					target_cn_hostname=$1
+					target_cn_uuid=$(sdc-server lookup hostname="${target_cn_hostname}")
+				fi
+
+				# check for target CN underlay NIC first
+				target_cn_address=$(sdc-server nics "${target_cn_uuid}" | json -a -c 'this.underlay === true' ip)
+
+				# fallback to admin NIC
+				if [ -z "${target_cn_address}" ]; then
+					target_cn_address=$(sdc-server admin-ip "${target_cn_uuid}")
+				fi
+				;;
+			-h|--help)
+				print_help
+				exit
+				;;
+			*)
+				vm_uuid=$1
+				;;
+		esac
+		shift
+	done
+}
+
+run_cmd_on_target_cn() {
+	ssh -i /root/.ssh/sdc.id_rsa "${target_cn_address}" "$@"
+}
+
+run_cmd_on_source_cn() {
+	ssh -i /root/.ssh/sdc.id_rsa "${source_cn_address}" "$@"
+}
+
+process_script_result() {
+	local out=$1 error exit_status stdout stderr
+	# printf "output from script:\n%s\n" "${out}"
+
+	# first check to see if sdc-oneachnode failed / timed out
+	error=$(json error <<< "${out}")
+
+	if [ -n "${error}" ]; then
+		echo "${error}"
+		exit 1
+	fi
+
+	exit_status=$(json result.exit_status <<< "${out}")
+	stdout=$(json result.stdout <<< "${out}")
+	stderr=$(json result.stderr <<< "${out}")
+
+	[ -n "${stdout}" ] && echo "${stdout}"
+
+	if [ "${exit_status}" -ne 0 ]; then
+		[ -n "${stderr}" ] && echo "${stderr}"
+		exit "${exit_status}"
+	fi
+}
+
+validate_params() {
+	# there are no params to validate for listing migrations
+	${list} && return
+
+	if ${finalize} || ${rollback}; then
+		load_migration_record
+	fi
+
+	if [ -z "${vm_uuid}" ]; then
+		echo "No VM UUID specified" >&2
+		print_help
+		exit 1
+	fi
+
+	if [ -z "${vm_alias}" ]; then
+		# validate VM UUID
+		vm_alias=$(get_vm_prop "alias")
+
+		if [ -z "${vm_alias}" ]; then
+			echo "Failed to lookup alias for VM ${vm_uuid}" >&2
+			exit 1
+		fi
+	fi
+
+	# make sure there is a record of this migration before finalizing or rolling back
+	if ${finalize} || ${rollback} && [ ! -f "/opt/.vm-migration.${vm_uuid}" ]; then
+		echo "No migration record found for VM ${vm_uuid}" >&2
+		exit 1
+	fi
+
+	if [ -z "${target_cn_address}" ]; then
+		echo "No target CN address specified" >&2
+		print_help
+		exit 1
+	fi
+
+	# don't try to connect to the target CN from the HN since we are not defaulting to the underlay NIC
+	# and the head node does not have a NIC on the underlay network. Instead leave the SSH connection
+	# validation to the source CN.
+	# if ! run_cmd_on_target_cn "exit 0"; then
+	# 	ssh_rc=${PIPESTATUS[0]}
+	# 	echo "Failed to SSH to ${target_cn_address}" >&2
+	# 	exit "${ssh_rc}"
+	# fi
+}
+
+print_start() {
+	printf "%s..." "$@"
+}
+
+print_end() {
+	printf " done\n"
+}
+
+create_migration_record() {
+	print_start "Creating migration record"
+	{
+		echo "# Migration started on $(date)"
+		echo "source_cn_uuid=${source_cn_uuid}"
+		echo "source_cn_hostname=${source_cn_hostname}"
+		echo "source_cn_address=${source_cn_address}"
+		echo "target_cn_hostname=${target_cn_hostname}"
+		echo "target_cn_address=${target_cn_address}"
+		echo "vm_alias=${vm_alias}"
+		# echo "has_delegate_dataset=${has_delegate_dataset}"
+	} > "/opt/.vm-migration.${vm_uuid}"
+	print_end
+}
+
+load_migration_record() {
+	print_start "Loading migration record"
+	# shellcheck disable=SC1090
+	source "/opt/.vm-migration.${vm_uuid}"
+
+	for var in source_cn_uuid source_cn_hostname source_cn_address target_cn_hostname target_cn_address vm_alias; do
+		if [ -z "${!var}" ]; then
+			echo "${var} was not found in /opt/.vm-migration.${vm_uuid}" >&2
+			exit 1
+		fi
+	done
+
+	print_end
+}
+
+delete_migration_record() {
+	print_start "Deleting migration record"
+	rm "/opt/.vm-migration.${vm_uuid}"
+	print_end
+}
+
+create_vm_info_backup() {
+	print_start "Backing up source VM info"
+	sdc-vmapi "/vms/${vm_uuid}" | json -H > "/opt/.vm-migration.${vm_uuid}.backup"
+	print_end
+}
+
+get_vm_prop() {
+	if [ -f "/opt/.vm-migration.${vm_uuid}.backup" ]; then
+		json "${1}" < "/opt/.vm-migration.${vm_uuid}.backup"
+	else
+		sdc-vmapi "/vms/${vm_uuid}" | json -H "${1}"
+	fi
+}
+
+delete_vm_info_backup() {
+	print_start "Deleting source VM info backup"
+	rm "/opt/.vm-migration.${vm_uuid}.backup"
+	print_end
+}
+
+main "$@"
