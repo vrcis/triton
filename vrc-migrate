@@ -46,6 +46,7 @@ main() {
 
 		create_migration_record
 		create_vm_info_backup
+		remove_source_quota
 
 		# install the vrc-sdc-migrate.sh script on the source CN
 		printf "Installing /opt/local/bin/vrc-sdc-migrate.sh on the source CN (%s)... " "${source_cn_hostname}"
@@ -71,6 +72,7 @@ main() {
 		# process_script_result "${out}"
 		run_cmd_on_source_cn "/opt/local/bin/vrc-sdc-migrate.sh finalize -n ${target_cn_address} ${vm_uuid} && rm /opt/local/bin/vrc-sdc-migrate.sh"
 
+		restore_target_quota
 		delete_vm_info_backup
 		delete_migration_record
 		echo "VM migration finalized!"
@@ -83,6 +85,7 @@ main() {
 		# process_script_result "${out}"
 		run_cmd_on_source_cn "/opt/local/bin/vrc-sdc-migrate.sh rollback -n ${target_cn_address} ${vm_uuid} && rm /opt/local/bin/vrc-sdc-migrate.sh"
 
+		restore_source_quota
 		delete_vm_info_backup
 		echo "VM migration successfully rolled back."
 	fi
@@ -151,10 +154,11 @@ process_arguments() {
 
 				# check for target CN underlay NIC first
 				target_cn_address=$(sdc-server nics "${target_cn_uuid}" | json -a -c 'this.underlay === true' ip)
+				target_cn_admin_address=$(sdc-server admin-ip "${target_cn_uuid}")
 
 				# fallback to admin NIC
 				if [ -z "${target_cn_address}" ]; then
-					target_cn_address=$(sdc-server admin-ip "${target_cn_uuid}")
+					target_cn_address="${target_cn_admin_address}"
 				fi
 				;;
 			-h|--help)
@@ -170,11 +174,31 @@ process_arguments() {
 }
 
 run_cmd_on_target_cn() {
-	ssh -i /root/.ssh/sdc.id_rsa "${target_cn_address}" "$@"
+	ssh -i /root/.ssh/sdc.id_rsa "${target_cn_admin_address}" "$@"
 }
 
 run_cmd_on_source_cn() {
 	ssh -i /root/.ssh/sdc.id_rsa "${source_cn_address}" "$@"
+}
+
+remove_source_quota() {
+	original_quota=$(run_cmd_on_source_cn "zfs get -Ho value quota zones/${vm_uuid}")
+	append_to_migration_record "original_quota=${original_quota}"
+	print_start "Temporarily changing ZFS quota from ${original_quota} to none"
+	run_cmd_on_source_cn "zfs set quota=none zones/${vm_uuid}"
+	print_end
+}
+
+restore_source_quota() {
+	print_start "Restoring ZFS quota back to ${original_quota} on source VM"
+	run_cmd_on_source_cn "zfs set quota=${original_quota} zones/${vm_uuid}"
+	print_end
+}
+
+restore_target_quota() {
+	print_start "Restoring ZFS quota back to ${original_quota} on target VM"
+	run_cmd_on_target_cn "zfs set quota=${original_quota} zones/${vm_uuid}"
+	print_end
 }
 
 process_script_result() {
@@ -264,10 +288,15 @@ create_migration_record() {
 		echo "source_cn_address=${source_cn_address}"
 		echo "target_cn_hostname=${target_cn_hostname}"
 		echo "target_cn_address=${target_cn_address}"
+		echo "target_cn_admin_address=${target_cn_admin_address}"
 		echo "vm_alias=${vm_alias}"
 		# echo "has_delegate_dataset=${has_delegate_dataset}"
 	} > "/opt/.vm-migration.${vm_uuid}"
 	print_end
+}
+
+append_to_migration_record() {
+	echo "$@" >> "/opt/.vm-migration.${vm_uuid}"
 }
 
 load_migration_record() {
