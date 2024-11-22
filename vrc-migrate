@@ -7,6 +7,7 @@ set -o errexit
 set -o pipefail
 
 # SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+inner_script_name="vrc-migrate-inner"
 
 main() {
 	process_arguments "$@"
@@ -48,18 +49,16 @@ main() {
 		create_vm_info_backup
 		remove_source_quota
 
-		# install the vrc-sdc-migrate.sh script on the source CN
-		printf "Installing /opt/local/bin/vrc-sdc-migrate.sh on the source CN (%s)... " "${source_cn_hostname}"
+		# install the migration script on the source CN
+		printf "Installing ${inner_script_name} on the source CN (%s)... " "${source_cn_hostname}"
 		out=$(sdc-oneachnode -n "${source_cn_uuid}" -J "mkdir -p /opt/local/bin")
 		process_script_result "${out}"
 
-		out=$(sdc-oneachnode -n "${source_cn_uuid}" -J --get=/opt/local/bin/vrc-sdc-migrate.sh --dir=/opt/local/bin -X)
+		out=$(sdc-oneachnode -n "${source_cn_uuid}" -J --get="/opt/local/bin/${inner_script_name}" --dir=/opt/local/bin -X)
 		process_script_result "${out}"
 
-		# run the script on the source CN (30 min timeout)
-		# out=$(sdc-oneachnode -n "${source_cn_uuid}" -J --exectimeout=1800 "chmod +x /opt/local/bin/vrc-sdc-migrate.sh && /opt/local/bin/vrc-sdc-migrate.sh migrate -n ${target_cn_address} ${vm_uuid}")
-		# process_script_result "${out}"
-		run_cmd_on_source_cn "chmod +x /opt/local/bin/vrc-sdc-migrate.sh && /opt/local/bin/vrc-sdc-migrate.sh migrate -n ${target_cn_address} ${vm_uuid}"
+		# run the script on the source CN
+		run_cmd_on_source_cn "chmod +x /opt/local/bin/${inner_script_name} && /opt/local/bin/${inner_script_name} migrate -n ${target_cn_address} ${vm_uuid}"
 
 		echo "VM migration successful!"
 		echo "Run the script again with the finalize or rollback subcommand to complete or rollback the migration."
@@ -68,9 +67,7 @@ main() {
 		echo "Finalizing migration for VM ${vm_uuid} (${vm_alias}) to CN ${target_cn_hostname}..."
 
 		# run the script on the source CN
-		# out=$(sdc-oneachnode -n "${source_cn_uuid}" -J --exectimeout=300 "/opt/local/bin/vrc-sdc-migrate.sh finalize -n ${target_cn_address} ${vm_uuid} && rm /opt/local/bin/vrc-sdc-migrate.sh")
-		# process_script_result "${out}"
-		run_cmd_on_source_cn "/opt/local/bin/vrc-sdc-migrate.sh finalize -n ${target_cn_address} ${vm_uuid} && rm /opt/local/bin/vrc-sdc-migrate.sh"
+		run_cmd_on_source_cn "/opt/local/bin/${inner_script_name} finalize -n ${target_cn_address} ${vm_uuid} && rm /opt/local/bin/${inner_script_name}"
 
 		restore_target_quota
 		delete_vm_info_backup
@@ -81,9 +78,7 @@ main() {
 		echo "Rolling back migration for VM ${vm_uuid} (${vm_alias}) to CN ${target_cn_hostname}..."
 
 		# run the script on the source CN
-		# out=$(sdc-oneachnode -n "${source_cn_uuid}" -J --exectimeout=300 "chmod +x /opt/local/bin/vrc-sdc-migrate.sh && /opt/local/bin/vrc-sdc-migrate.sh rollback -n ${target_cn_address} ${vm_uuid} && rm /opt/local/bin/vrc-sdc-migrate.sh")
-		# process_script_result "${out}"
-		run_cmd_on_source_cn "/opt/local/bin/vrc-sdc-migrate.sh rollback -n ${target_cn_address} ${vm_uuid} && rm /opt/local/bin/vrc-sdc-migrate.sh"
+		run_cmd_on_source_cn "/opt/local/bin/${inner_script_name} rollback -n ${target_cn_address} ${vm_uuid} && rm /opt/local/bin/${inner_script_name}"
 
 		restore_source_quota
 		delete_vm_info_backup
