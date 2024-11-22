@@ -6,9 +6,15 @@
 set -o errexit
 set -o pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+# SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+SCRIPT_NAME=$(basename "$0")
 
 main() {
+	if [ "$(sysinfo | json 'Boot Parameters'.headnode)" = "true" ]; then
+		echo "${SCRIPT_NAME} cannot be run from the head node." >&2
+		exit 1
+	fi
+
 	process_arguments "$@"
 	validate_params
 
