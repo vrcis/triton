@@ -244,12 +244,19 @@ sync_datasets() {
 			output=$(run_cmd_on_target_cn "imgadm import ${origin_image_uuid}" 2>&1) || { rc=${PIPESTATUS[0]}; echo "${output}"; return "${rc}"; }
 			print_start_indent "${output}"
 			print_end
-		fi
 
-		# ZFS send/recv from the source CN to the target CN
-		print_start_indent "Syncing ${dataset}@${snapshot_name}"
-		zfs send "${dataset}@${snapshot_name}" | ssh -i /root/.ssh/sdc.id_rsa -c aes128-gcm@openssh.com "${target_cn_address}" "zfs recv ${preserved_props} -d zones"
-		print_end
+			# ZFS send/recv from the source CN to the target CN
+			# doing an incremental send from the image's @final snapshot
+			# since the image already exists on the target CN
+			print_start_indent "Syncing ${dataset}@${snapshot_name} incrementally from zones/${origin_image_uuid}@final"
+			zfs send -I "zones/${origin_image_uuid}@final" "${dataset}@${snapshot_name}" | ssh -i /root/.ssh/sdc.id_rsa -c aes128-gcm@openssh.com "${target_cn_address}" "zfs recv ${preserved_props} -d zones"
+			print_end
+		else
+			# ZFS send/recv from the source CN to the target CN
+			print_start_indent "Syncing ${dataset}@${snapshot_name}"
+			zfs send "${dataset}@${snapshot_name}" | ssh -i /root/.ssh/sdc.id_rsa -c aes128-gcm@openssh.com "${target_cn_address}" "zfs recv ${preserved_props} -d zones"
+			print_end
+		fi
 	done
 }
 
