@@ -67,7 +67,7 @@ main() {
 		echo "Finalizing migration for VM ${vm_uuid} (${vm_alias}) to CN ${target_cn_hostname}..."
 
 		# run the script on the source CN
-		run_cmd_on_source_cn "/opt/local/bin/${inner_script_name} finalize -n ${target_cn_address} ${vm_uuid} && rm /opt/local/bin/${inner_script_name}"
+		run_cmd_on_source_cn "/opt/local/bin/${inner_script_name} finalize -n ${target_cn_address} ${vm_uuid}"
 
 		restore_target_quota
 		delete_vm_info_backup
@@ -78,7 +78,7 @@ main() {
 		echo "Rolling back migration for VM ${vm_uuid} (${vm_alias}) to CN ${target_cn_hostname}..."
 
 		# run the script on the source CN
-		run_cmd_on_source_cn "/opt/local/bin/${inner_script_name} rollback -n ${target_cn_address} ${vm_uuid} && rm /opt/local/bin/${inner_script_name}"
+		run_cmd_on_source_cn "/opt/local/bin/${inner_script_name} rollback -n ${target_cn_address} ${vm_uuid}"
 
 		restore_source_quota
 		delete_vm_info_backup
