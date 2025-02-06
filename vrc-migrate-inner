@@ -235,10 +235,10 @@ sync_datasets() {
 			prop_names="sync"
 		# filesystem
 		else
-			prop_names="quota,recordsize,mountpoint,sharenfs,sync"
+			prop_names="quota,recordsize,mountpoint,sharenfs,sharesmb,sync,zoned,devices"
 		fi
 
-		preserved_props=$(zfs get -Ho property,value "${prop_names}" "${dataset}" | awk '{print "-o", $1 "=" $2}' | xargs)
+		preserved_props=$(zfs get -Ho property,value -s local "${prop_names}" "${dataset}" | awk '{print "-o", $1 "=" $2}' | xargs)
 
 		origin=$(zfs get -Ho value origin "${dataset}")
 		if [ "${origin}" != "-" ]; then
