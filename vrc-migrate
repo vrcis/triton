@@ -45,6 +45,29 @@ main() {
 			exit 1
 		fi
 
+		# check for target CN underlay NIC first
+		target_cn_address=$(sdc-server nics "${target_cn_uuid}" | json -a -c 'this.underlay === true' ip)
+		target_cn_admin_address=$(sdc-server admin-ip "${target_cn_uuid}")
+
+		# if the target CN is not on the underlay network, fallback to admin network
+		if [ -z "${target_cn_address}" ]; then
+			target_cn_address="${target_cn_admin_address}"
+		else
+			# the target CN has an underlay IP so check to see if the source CN also has an underlay IP
+			source_cn_underlay_address=$(sdc-server nics "${source_cn_uuid}" | json -a -c 'this.underlay === true' ip)
+			
+			# if the source CN does not have an underlay IP then fallback to using the target CN's admin IP
+			if [ -z "${source_cn_underlay_address}" ]; then
+				target_cn_address="${target_cn_admin_address}"
+			else
+				# both CNs have an underay IP, make sure the source CN can reach the target CN
+				# on the underlay network, otherwise default to using the target CN's admin IP
+				if ! run_cmd_on_source_cn "ping -c 1 ${target_cn_address} 5 &>/dev/null"; then
+					target_cn_address="${target_cn_admin_address}"
+				fi
+			fi
+		fi
+
 		create_migration_record
 		create_vm_info_backup
 		remove_source_quota
@@ -146,15 +169,6 @@ process_arguments() {
 					target_cn_hostname=$1
 					target_cn_uuid=$(sdc-server lookup hostname="${target_cn_hostname}")
 				fi
-
-				# check for target CN underlay NIC first
-				target_cn_address=$(sdc-server nics "${target_cn_uuid}" | json -a -c 'this.underlay === true' ip)
-				target_cn_admin_address=$(sdc-server admin-ip "${target_cn_uuid}")
-
-				# fallback to admin NIC
-				if [ -z "${target_cn_address}" ]; then
-					target_cn_address="${target_cn_admin_address}"
-				fi
 				;;
 			-h|--help)
 				print_help
@@ -250,8 +264,8 @@ validate_params() {
 		exit 1
 	fi
 
-	if [ -z "${target_cn_address}" ]; then
-		echo "No target CN address specified" >&2
+	if [ -z "${target_cn_uuid}" ]; then
+		echo "No target CN specified" >&2
 		print_help
 		exit 1
 	fi
@@ -281,6 +295,7 @@ create_migration_record() {
 		echo "source_cn_uuid=${source_cn_uuid}"
 		echo "source_cn_hostname=${source_cn_hostname}"
 		echo "source_cn_address=${source_cn_address}"
+		echo "target_cn_uuid=${target_cn_uuid}"
 		echo "target_cn_hostname=${target_cn_hostname}"
 		echo "target_cn_address=${target_cn_address}"
 		echo "target_cn_admin_address=${target_cn_admin_address}"
