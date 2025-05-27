@@ -7,14 +7,15 @@ set -o xtrace
 main() {
 	wait_for_apt_lock
 	apt-get -y update
+	configure_rke2
 	configure_nfs_client
 }
 
 wait_for_apt_lock() {
-   printf "Waiting for other apt processes to finish"
-   while fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
-      sleep 5
-   done
+	printf "Waiting for other apt processes to finish"
+	while fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
+		sleep 5
+	done
 }
 
 configure_nfs_client() {
@@ -58,6 +59,32 @@ configure_nfs_client() {
 		# and to match the UID of the _pkgsrc user on the Triton volume since we're not configuring
 		# the Triton volume with a NFSv4 domain that matches the domain on the client.
 		useradd -u 999 _pkgsrc
+	fi
+}
+
+configure_rke2() {
+	# https://docs.rke2.io/install/configuration#configuration-file
+
+	# find internal fabric IP
+	PRIVATE_IP=$(ip -4 addr | awk '/inet 192\.168/ {print $2}' | cut -d/ -f1 | head -n1)
+
+	# abort if no matching IP is found
+	if [ -z "$PRIVATE_IP" ]; then
+		echo "Error: No 192.168.x.x IP found on any interface."
+		exit 1
+	fi
+
+	# ensure config directory exists
+	mkdir -p /etc/rancher/rke2
+
+	# write RKE2 config file
+	cat <<EOF > /etc/rancher/rke2/config.yaml
+node-ip: ${PRIVATE_IP}
+EOF
+
+	# restart the agent if already running
+	if systemctl is-active --quiet rke2-agent; then
+		systemctl restart rke2-agent
 	fi
 }
 
