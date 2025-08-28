@@ -65,14 +65,47 @@ configure_nfs_client() {
 configure_rke2() {
 	# https://docs.rke2.io/install/configuration#configuration-file
 
-	# find internal fabric IP
-	PRIVATE_IP=$(ip -4 addr | awk '/inet 192\.168/ {print $2}' | cut -d/ -f1 | head -n1)
+	# Get IPs from Triton metadata using nic_tag
+	NICS_JSON=$(mdata-get sdc:nics)
+	
+	# Find private IP (nic_tag starts with "sdc_overlay")
+	PRIVATE_IP=$(echo "$NICS_JSON" | python3 -c "
+import json, sys
+nics = json.load(sys.stdin)
+for nic in nics:
+    if nic.get('nic_tag', '').startswith('sdc_overlay'):
+        print(nic['ip'])
+        break
+")
+	
+	# Find public IP (nic_tag = "public") - preferred for external
+	PUBLIC_IP=$(echo "$NICS_JSON" | python3 -c "
+import json, sys
+nics = json.load(sys.stdin)
+for nic in nics:
+    if nic.get('nic_tag') == 'public':
+        print(nic['ip'])
+        break
+")
+	
+	# Find external IP (nic_tag = "external") - fallback if no public
+	EXTERNAL_IP=$(echo "$NICS_JSON" | python3 -c "
+import json, sys
+nics = json.load(sys.stdin)
+for nic in nics:
+    if nic.get('nic_tag') == 'external':
+        print(nic['ip'])
+        break
+")
 
-	# abort if no matching IP is found
+	# abort if no private IP is found
 	if [ -z "$PRIVATE_IP" ]; then
-		echo "Error: No 192.168.x.x IP found on any interface."
+		echo "Error: No sdc_overlay IP found in Triton metadata."
 		exit 1
 	fi
+	
+	# Determine which IP to use for node-external-ip (prefer public over external)
+	NODE_EXTERNAL_IP="${PUBLIC_IP:-${EXTERNAL_IP}}"
 
 	# ensure config directory exists
 	mkdir -p /etc/rancher/rke2
@@ -81,6 +114,16 @@ configure_rke2() {
 	cat <<EOF > /etc/rancher/rke2/config.yaml
 node-ip: ${PRIVATE_IP}
 EOF
+
+	# Add external IP if available (public takes precedence over external)
+	if [ -n "${NODE_EXTERNAL_IP}" ]; then
+		cat <<EOF >> /etc/rancher/rke2/config.yaml
+node-external-ip: ${NODE_EXTERNAL_IP}
+EOF
+		echo "Configured RKE2 with node-ip=${PRIVATE_IP}, node-external-ip=${NODE_EXTERNAL_IP}"
+	else
+		echo "Configured RKE2 with node-ip=${PRIVATE_IP} (no external/public IP found)"
+	fi
 
 	# restart the agent if already running
 	if systemctl is-active --quiet rke2-agent; then
