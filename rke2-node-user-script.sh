@@ -154,9 +154,11 @@ EOF
 		echo "Configured RKE2 ${ROLE} with node-ip=${PRIVATE_IP} (no external IP)"
 	fi
 
-	# restart the agent if already running
+	# restart the rke2 server/agent service if already running
 	if systemctl is-active --quiet rke2-agent; then
 		systemctl restart rke2-agent
+	elif systemctl is-active --quiet rke2-server; then
+		systemctl restart rke2-server
 	fi
 }
 
