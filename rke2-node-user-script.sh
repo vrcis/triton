@@ -7,8 +7,16 @@ set -o xtrace
 main() {
 	wait_for_apt_lock
 	apt-get -y update
+	
+	# Detect node role first (needed by configure_rke2 and configure_nfs_client)
+	detect_node_role
+	
 	configure_rke2
-	configure_nfs_client
+	
+	# Configure NFS only for worker nodes
+	if [ "$ROLE" = "worker" ]; then
+		configure_nfs_client
+	fi
 }
 
 wait_for_apt_lock() {
@@ -16,6 +24,21 @@ wait_for_apt_lock() {
 	while fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
 		sleep 5
 	done
+}
+
+detect_node_role() {
+	# Get role from Triton metadata (control, etcd, worker)
+	# This must be set in metadata since RKE2 isn't installed yet when this script runs
+	ROLE=$(mdata-get role 2>/dev/null || echo "")
+	
+	# If no role in metadata, default to worker since that's what previously
+	# ran this script (and NFS is safe to configure even if not needed)
+	if [ -z "$ROLE" ]; then
+		echo "Warning: No role found in metadata, defaulting to 'worker' for backwards compatibility"
+		ROLE="worker"
+	fi
+	
+	echo "Node role: $ROLE"
 }
 
 configure_nfs_client() {
@@ -78,17 +101,7 @@ for nic in nics:
         break
 ")
 	
-	# Find public IP (nic_tag = "public") - preferred for external
-	PUBLIC_IP=$(echo "$NICS_JSON" | python3 -c "
-import json, sys
-nics = json.load(sys.stdin)
-for nic in nics:
-    if nic.get('nic_tag') == 'public':
-        print(nic['ip'])
-        break
-")
-	
-	# Find external IP (nic_tag = "external") - fallback if no public
+	# Find external IP (nic_tag = "external") - all nodes can have this
 	EXTERNAL_IP=$(echo "$NICS_JSON" | python3 -c "
 import json, sys
 nics = json.load(sys.stdin)
@@ -97,15 +110,31 @@ for nic in nics:
         print(nic['ip'])
         break
 ")
+	
+	# Only look for public IP for worker nodes
+	if [ "$ROLE" = "worker" ]; then
+		# Find public IP (nic_tag = "public") - internet routable, workers only
+		PUBLIC_IP=$(echo "$NICS_JSON" | python3 -c "
+import json, sys
+nics = json.load(sys.stdin)
+for nic in nics:
+    if nic.get('nic_tag') == 'public':
+        print(nic['ip'])
+        break
+")
+		
+		# For workers: prefer public over external for node-external-ip
+		NODE_EXTERNAL_IP="${PUBLIC_IP:-${EXTERNAL_IP}}"
+	else
+		# Control and etcd nodes: use external IP only (no public IP)
+		NODE_EXTERNAL_IP="${EXTERNAL_IP}"
+	fi
 
 	# abort if no private IP is found
 	if [ -z "$PRIVATE_IP" ]; then
 		echo "Error: No sdc_overlay IP found in Triton metadata."
 		exit 1
 	fi
-	
-	# Determine which IP to use for node-external-ip (prefer public over external)
-	NODE_EXTERNAL_IP="${PUBLIC_IP:-${EXTERNAL_IP}}"
 
 	# ensure config directory exists
 	mkdir -p /etc/rancher/rke2
@@ -115,14 +144,14 @@ for nic in nics:
 node-ip: ${PRIVATE_IP}
 EOF
 
-	# Add external IP if available (public takes precedence over external)
+	# Add external IP if available (public for workers, external for control/etcd)
 	if [ -n "${NODE_EXTERNAL_IP}" ]; then
 		cat <<EOF >> /etc/rancher/rke2/config.yaml
 node-external-ip: ${NODE_EXTERNAL_IP}
 EOF
-		echo "Configured RKE2 with node-ip=${PRIVATE_IP}, node-external-ip=${NODE_EXTERNAL_IP}"
+		echo "Configured RKE2 ${ROLE} with node-ip=${PRIVATE_IP}, node-external-ip=${NODE_EXTERNAL_IP}"
 	else
-		echo "Configured RKE2 with node-ip=${PRIVATE_IP} (no external/public IP found)"
+		echo "Configured RKE2 ${ROLE} with node-ip=${PRIVATE_IP} (no external IP)"
 	fi
 
 	# restart the agent if already running
