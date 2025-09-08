@@ -142,6 +142,7 @@ for nic in nics:
 	# write RKE2 config file
 	cat <<EOF > /etc/rancher/rke2/config.yaml
 node-ip: ${PRIVATE_IP}
+advertise-address: ${PRIVATE_IP}
 EOF
 
 	# Add external IP if available (public for workers, external for control/etcd)
